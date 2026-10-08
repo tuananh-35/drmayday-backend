@@ -1,0 +1,502 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============ ENUMS ============
+enum Gender {
+  male
+  female
+  other
+}
+
+enum QuestionType {
+  text
+  textarea
+  number
+  date
+  radio
+  checkbox
+  image_upload
+}
+
+enum FilledBy {
+  patient
+  doctor
+  both
+}
+
+enum RecordStatus {
+  pending
+  in_progress
+  completed
+}
+
+enum Milestone {
+  start
+  peak
+  normal
+}
+
+// ============ 3.1 NGƯỜI DÙNG, PHÂN QUYỀN, HẠ TẦNG ============
+model Role {
+  id           Int              @id @default(autoincrement())
+  name         String           @unique
+  description  String?
+  parentRoleId Int?             @map("parent_role_id")
+  parent       Role?            @relation("RoleTree", fields: [parentRoleId], references: [id], onDelete: SetNull)
+  children     Role[]           @relation("RoleTree")
+  users        User[]
+  permissions  RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          Int                  @id @default(autoincrement())
+  code        String               @unique // vd: manage_users, view_medical_records
+  description String?
+  roles       RolePermission[]
+  endpoints   PermissionEndpoint[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       Int        @map("role_id")
+  permissionId Int        @map("permission_id")
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model ApiEndpoint {
+  id          Int                  @id @default(autoincrement())
+  method      String
+  path        String
+  permissions PermissionEndpoint[]
+
+  @@unique([method, path])
+  @@map("api_endpoints")
+}
+
+model PermissionEndpoint {
+  permissionId Int         @map("permission_id")
+  endpointId   Int         @map("endpoint_id")
+  permission   Permission  @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  endpoint     ApiEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@id([permissionId, endpointId])
+  @@map("permissions_endpoints")
+}
+
+// Bảng trung tâm: định danh + mật khẩu. role_id đặt ở đây (nguồn sự thật duy nhất).
+model User {
+  id               Int       @id @default(autoincrement())
+  fullName         String    @map("full_name")
+  phone            String    @unique
+  email            String?   @unique
+  passwordHash     String    @map("password_hash")
+  roleId           Int       @map("role_id")
+  isActive         Boolean   @default(true) @map("is_active")
+  resetToken       String?   @map("reset_token")
+  resetTokenExpiry DateTime? @map("reset_token_expiry")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  role     Role                      @relation(fields: [roleId], references: [id])
+  staff    Staff?
+  patient  Patient?
+  fcmTokens UserFcmToken[]
+  blacklist TokenBlacklist[]
+  notifications Notification[]
+  notificationSetting UserNotificationSetting?
+  mediaAttachments MediaAttachment[]
+  createdTemplates Template[]
+
+  @@map("users")
+}
+
+model Staff {
+  userId       Int         @id @map("user_id")
+  branchId     Int?        @map("branch_id")
+  departmentId Int?        @map("department_id")
+  roomId       Int?        @map("room_id")
+  position     String?
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch       Branch?     @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  room         Room?       @relation(fields: [roomId], references: [id], onDelete: Restrict)
+
+  assignedRecords MedicalRecord[] @relation("AssignedDoctor")
+  createdRecords  MedicalRecord[] @relation("RecordCreator")
+  prescriptions   Prescription[]
+  labRequests     LabRequest[]
+
+  @@map("staffs")
+}
+
+model Patient {
+  userId         Int       @id @map("user_id")
+  yearOfBirth    Int?      @map("year_of_birth")
+  gender         Gender?
+  occupation     String?
+  ethnicity      String?
+  province       String?
+  district       String?
+  ward           String?
+  addressDetail  String?   @map("address_detail")
+  insuranceNumber String?  @map("insurance_number")
+  relativeName   String?   @map("relative_name")
+  relativePhone  String?   @map("relative_phone")
+  outpatientDate DateTime? @map("outpatient_date") @db.Date
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  medicalRecords MedicalRecord[]
+  lesionEpisodes LesionEpisode[]
+  uas7Scores     Uas7Score[]
+
+  @@map("patients")
+}
+
+model Branch {
+  id          Int          @id @default(autoincrement())
+  name        String
+  address     String?
+  phone       String?
+  departments Department[]
+  staffs      Staff[]
+
+  @@map("branches")
+}
+
+model Department {
+  id       Int     @id @default(autoincrement())
+  branchId Int     @map("branch_id")
+  name     String
+  branch   Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  rooms    Room[]
+  staffs   Staff[]
+
+  @@map("departments")
+}
+
+model Room {
+  id           Int         @id @default(autoincrement())
+  departmentId Int?        @map("department_id")
+  name         String
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  staffs       Staff[]
+
+  @@map("rooms")
+}
+
+model TokenBlacklist {
+  id        Int      @id @default(autoincrement())
+  tokenHash String   @unique @map("token_hash") // sha256 của access token
+  userId    Int      @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("token_blacklist")
+}
+
+model UserFcmToken {
+  id         Int      @id @default(autoincrement())
+  userId     Int      @map("user_id")
+  fcmToken   String   @map("fcm_token")
+  deviceInfo String?  @map("device_info")
+  createdAt  DateTime @default(now()) @map("created_at")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, fcmToken])
+  @@map("user_fcm_tokens")
+}
+
+// ============ 3.2 FORM BUILDER ============
+model Template {
+  id           Int               @id @default(autoincrement())
+  codeTemplate String            @unique @map("code_template")
+  name         String
+  description  String?
+  version      Int               @default(1)
+  isActive     Boolean           @default(true) @map("is_active")
+  createdBy    Int?              @map("created_by")
+  creator      User?             @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+  sections     TemplateSection[]
+  records      MedicalRecord[]
+
+  @@map("templates")
+}
+
+model TemplateSection {
+  id         Int        @id @default(autoincrement())
+  templateId Int        @map("template_id")
+  title      String
+  orderIndex Int        @default(0) @map("order_index")
+  filledBy   FilledBy   @default(patient) @map("filled_by")
+  template   Template   @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  questions  Question[]
+
+  @@map("template_sections")
+}
+
+model Question {
+  id               Int            @id @default(autoincrement())
+  sectionId        Int            @map("section_id")
+  parentQuestionId Int?           @map("parent_question_id")
+  content          String
+  typeQuestion     QuestionType   @map("type_question")
+  isRequired       Boolean        @default(false) @map("is_required")
+  orderIndex       Int            @default(0) @map("order_index")
+  showIfAnswer     Json?          @map("show_if_answer")
+  conditionRules   Json?          @map("condition_rules")
+  section          TemplateSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  parent           Question?      @relation("QuestionTree", fields: [parentQuestionId], references: [id], onDelete: Restrict)
+  children         Question[]     @relation("QuestionTree")
+  options          QuestionOption[]
+  answers          Answer[]
+
+  @@map("questions")
+}
+
+model QuestionOption {
+  id         Int      @id @default(autoincrement())
+  questionId Int      @map("question_id")
+  label      String
+  value      String
+  orderIndex Int      @default(0) @map("order_index")
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@map("question_options")
+}
+
+// ============ 3.3 BỆNH ÁN & MEDIA ============
+model MedicalRecord {
+  id               Int          @id @default(autoincrement())
+  patientId        Int          @map("patient_id")
+  templateId       Int          @map("template_id")
+  assignedDoctorId Int?         @map("assigned_doctor_id")
+  createdBy        Int?         @map("created_by")
+  status           RecordStatus @default(pending)
+  instructions     String?
+  completedAt      DateTime?    @map("completed_at")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  patient        Patient   @relation(fields: [patientId], references: [userId], onDelete: Restrict)
+  template       Template  @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  assignedDoctor Staff?    @relation("AssignedDoctor", fields: [assignedDoctorId], references: [userId], onDelete: SetNull)
+  creator        Staff?    @relation("RecordCreator", fields: [createdBy], references: [userId], onDelete: SetNull)
+
+  answers        Answer[]
+  attachments    MediaAttachment[]
+  lesionEpisodes LesionEpisode[]
+  uas7Scores     Uas7Score[]
+  labRequests    LabRequest[]
+  prescriptions  Prescription[]
+
+  @@index([status])
+  @@index([patientId, createdAt])
+  @@map("medical_records")
+}
+
+model Answer {
+  id              Int           @id @default(autoincrement())
+  medicalRecordId Int           @map("medical_record_id")
+  questionId      Int           @map("question_id")
+  answerText      String?       @map("answer_text")
+  answerValue     Json?         @map("answer_value")
+  record          MedicalRecord @relation(fields: [medicalRecordId], references: [id], onDelete: Cascade)
+  question        Question      @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  images          AnswerImage[]
+
+  @@unique([medicalRecordId, questionId])
+  @@map("answers")
+}
+
+model MediaAttachment {
+  id              Int            @id @default(autoincrement())
+  userId          Int?           @map("user_id")
+  medicalRecordId Int?           @map("medical_record_id")
+  url             String
+  objectKey       String         @map("object_key")
+  mimeType        String         @map("mime_type")
+  sizeBytes       Int            @map("size_bytes")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  user            User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  record          MedicalRecord? @relation(fields: [medicalRecordId], references: [id], onDelete: SetNull)
+
+  answerImages    AnswerImage[]
+  lesionPhotos    LesionPhoto[]
+
+  @@map("media_attachments")
+}
+
+model AnswerImage {
+  id           Int             @id @default(autoincrement())
+  answerId     Int             @map("answer_id")
+  attachmentId Int             @map("attachment_id")
+  optionValue  String?         @map("option_value")
+  answer       Answer          @relation(fields: [answerId], references: [id], onDelete: Cascade)
+  attachment   MediaAttachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+
+  @@unique([answerId, attachmentId])
+  @@map("answer_images")
+}
+
+// ============ 3.4 TỔN THƯƠNG DA & UAS7 ============
+model LesionEpisode {
+  id              Int            @id @default(autoincrement())
+  patientId       Int            @map("patient_id")
+  medicalRecordId Int?           @map("medical_record_id")
+  name            String
+  startedAt       DateTime       @default(now()) @map("started_at")
+  contextTags     Json?          @map("context_tags") // ["sau_an","van_dong"]
+  medications     String?
+  note            String?
+  patient         Patient        @relation(fields: [patientId], references: [userId], onDelete: Cascade)
+  record          MedicalRecord? @relation(fields: [medicalRecordId], references: [id], onDelete: SetNull)
+  locations       LesionLocation[]
+
+  @@map("lesion_episodes")
+}
+
+model LesionLocation {
+  id        Int           @id @default(autoincrement())
+  episodeId Int           @map("episode_id")
+  bodyPart  String        @map("body_part")
+  note      String?
+  episode   LesionEpisode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  photos    LesionPhoto[]
+
+  @@map("lesion_locations")
+}
+
+model LesionPhoto {
+  id           Int             @id @default(autoincrement())
+  locationId   Int             @map("location_id")
+  attachmentId Int             @map("attachment_id")
+  milestone    Milestone
+  itchScore    Int?            @map("itch_score")
+  painScore    Int?            @map("pain_score")
+  burnScore    Int?            @map("burn_score")
+  hivesCount   Int?            @map("hives_count")
+  localAuas    Decimal?        @map("local_auas") @db.Decimal(6, 2)
+  takenAt      DateTime        @default(now()) @map("taken_at")
+  location     LesionLocation  @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  attachment   MediaAttachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+
+  @@map("lesion_photos")
+}
+
+model Uas7Score {
+  id              Int            @id @default(autoincrement())
+  patientId       Int            @map("patient_id")
+  medicalRecordId Int?           @map("medical_record_id")
+  scoreDate       DateTime       @map("score_date") @db.Date
+  iss7            Int
+  hss7            Int
+  dailyScore      Int            @map("daily_score")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  patient         Patient        @relation(fields: [patientId], references: [userId], onDelete: Cascade)
+  record          MedicalRecord? @relation(fields: [medicalRecordId], references: [id], onDelete: SetNull)
+
+  @@unique([patientId, scoreDate])
+  @@map("uas7_scores")
+}
+
+// ============ 3.5 CẬN LÂM SÀNG, ĐƠN THUỐC, THÔNG BÁO ============
+model LabRequest {
+  id              Int              @id @default(autoincrement())
+  medicalRecordId Int              @map("medical_record_id")
+  requestedBy     Int?             @map("requested_by")
+  note            String?
+  createdAt       DateTime         @default(now()) @map("created_at")
+  record          MedicalRecord    @relation(fields: [medicalRecordId], references: [id], onDelete: Cascade)
+  doctor          Staff?           @relation(fields: [requestedBy], references: [userId], onDelete: SetNull)
+  items           LabRequestItem[]
+
+  @@map("lab_requests")
+}
+
+model LabRequestItem {
+  id        Int         @id @default(autoincrement())
+  requestId Int         @map("request_id")
+  testName  String      @map("test_name")
+  request   LabRequest  @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  results   LabResult[]
+
+  @@map("lab_request_items")
+}
+
+model LabResult {
+  id             Int            @id @default(autoincrement())
+  itemId         Int            @map("item_id")
+  resultValue    String         @map("result_value")
+  unit           String?
+  referenceRange String?        @map("reference_range")
+  resultAt       DateTime       @default(now()) @map("result_at")
+  item           LabRequestItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@map("lab_results")
+}
+
+model Prescription {
+  id              Int               @id @default(autoincrement())
+  medicalRecordId Int               @map("medical_record_id")
+  doctorId        Int?              @map("doctor_id")
+  note            String?
+  createdAt       DateTime          @default(now()) @map("created_at")
+  record          MedicalRecord     @relation(fields: [medicalRecordId], references: [id], onDelete: Cascade)
+  doctor          Staff?            @relation(fields: [doctorId], references: [userId], onDelete: SetNull)
+  items           PrescriptionItem[]
+
+  @@map("prescriptions")
+}
+
+model PrescriptionItem {
+  id             Int          @id @default(autoincrement())
+  prescriptionId Int          @map("prescription_id")
+  medicineName   String       @map("medicine_name")
+  dosage         String?
+  frequency      String?
+  durationDays   Int?         @map("duration_days")
+  instructions   String?
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+
+  @@map("prescription_items")
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  title     String
+  body      String
+  type      String?  // appointment | lab_result | prescription
+  data      Json?
+  isRead    Boolean  @default(false) @map("is_read")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+model UserNotificationSetting {
+  userId              Int     @id @map("user_id")
+  appointmentEnabled  Boolean @default(true) @map("appointment_enabled")
+  labResultEnabled    Boolean @default(true) @map("lab_result_enabled")
+  prescriptionEnabled Boolean @default(true) @map("prescription_enabled")
+  soundEnabled        Boolean @default(true) @map("sound_enabled")
+  user                User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_notification_settings")
+}
